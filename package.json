@@ -1,0 +1,10 @@
+{
+  "name": "bni-vision-bot",
+  "private": true,
+  "type": "module",
+  "description": "ส่งคิวฟอร์ม Mentor Coordinator เข้าฟอร์ม Retention Tracking เดิม และปลุก Supabase ไม่ให้พัก",
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.3",
+    "playwright": "1.48.2"
+  }
+}
