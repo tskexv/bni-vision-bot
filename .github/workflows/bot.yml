@@ -1,0 +1,75 @@
+name: bni-vision-bot
+
+on:
+  # ทุก 30 นาที: ปลุกฐานข้อมูล Supabase (กันพัก) และส่งคิวฟอร์ม Mentor ถ้ามี
+  schedule:
+    - cron: '*/30 * * * *'
+  # กดสั่งเองได้ที่แท็บ Actions
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'submit = ส่งคิวเลย, dryrun = ทดสอบกรอกแต่ไม่กดส่ง, sync = ดึงช่วงสัปดาห์จากฟอร์มเดิม'
+        type: choice
+        options: [submit, dryrun, sync]
+        default: submit
+
+concurrency:
+  group: bni-vision-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      # ตรวจคิวแบบเร็ว (ไม่ต้องติดตั้งเบราว์เซอร์) — ทำทุกครั้ง ช่วยให้ Supabase ไม่พัก
+      - name: Ping database and check queue
+        id: check
+        run: node bot.mjs
+        env:
+          MODE: ping
+
+      - name: Install browser
+        if: github.event_name == 'workflow_dispatch' || steps.check.outputs.pending != '0'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run bot
+        if: github.event_name == 'workflow_dispatch' || steps.check.outputs.pending != '0'
+        run: node bot.mjs
+        env:
+          MODE: ${{ inputs.mode || 'submit' }}
+
+      - name: Save screenshots of failed items
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # GitHub หยุดงานตั้งเวลาถ้า repo ไม่มีความเคลื่อนไหว 60 วัน — commit ว่างทุก ~45 วันกันไว้
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 45*24*3600 )) ]; then
+            git config user.name "bni-vision-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
