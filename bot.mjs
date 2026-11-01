@@ -140,6 +140,44 @@ async function runQueue(browser, dryRun) {
   return `${dryRun ? 'ทดสอบ' : 'ส่ง'} ${items.length} รายการ · สำเร็จ ${ok} · ไม่สำเร็จ ${fail}`;
 }
 
+/** อ่านคำถาม (สิ่งที่ต้องทำ) ของแต่ละช่วงจากฟอร์มเดิม — ไม่กดส่งอะไร */
+async function readQuestions(frame, weeks) {
+  // บางฟอร์มต้องเลือกชื่อก่อนถึงจะโหลดคำถาม → เลือกตัวแรกไว้ (ไม่ได้ส่ง)
+  for (const sel of ['#memberName_m', '#mentorCoName', '#personalMentorName']) {
+    await frame.$eval(sel, el => { const o = [...el.options].find(o => o.value !== ''); if (o && !el.disabled) { el.value = o.value; el.dispatchEvent(new Event('change', { bubbles: true })); } }).catch(() => {});
+  }
+  const out = {};
+  for (const w of weeks) {
+    try {
+      await chooseWeek(frame, w);
+      out[w] = await frame.$eval('#questionsArea', a => {
+        const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+        const skip = t => !t || /^(yes|no|ใช่|ไม่ใช่|ไม่|-|\*)$/i.test(t);
+        const radios = [...a.querySelectorAll('input[type=radio]')];
+        const names = [...new Set(radios.map(r => r.name))];
+        const res = [];
+        for (const n of names) {
+          const group = radios.filter(r => r.name === n);
+          // กล่องที่ใหญ่ที่สุดที่มีแค่ข้อนี้ข้อเดียว
+          let box = group[0].parentElement, best = box;
+          while (box && box !== a && [...box.querySelectorAll('input[type=radio]')].every(r => r.name === n)) { best = box; box = box.parentElement; }
+          const lines = clean(best.innerText).split(/\s*\n\s*|(?=\s(?:Yes|No)\b)/).map(clean).filter(t => !skip(t));
+          const txt = clean((best.innerText || '').split('\n').map(clean).filter(t => !skip(t)).join(' '));
+          if (txt) res.push(txt.replace(/\s*(Yes|No)\s*/g, ' ').trim());
+          else if (lines.length) res.push(lines.join(' '));
+        }
+        for (const d of a.querySelectorAll('input[type=date]')) {
+          const l = (d.id && a.querySelector(`label[for="${d.id}"]`)) || d.closest('label') || d.parentElement;
+          const t = clean(l && l.innerText); if (t) res.push(t);
+        }
+        if (!res.length) clean(a.innerText).split(/(?<=[?？])\s+/).map(clean).filter(t => !skip(t)).forEach(t => res.push(t));
+        return [...new Set(res)].slice(0, 30);
+      });
+    } catch (e) { out[w] = []; console.log('อ่านคำถามไม่ได้', w, e.message); }
+  }
+  return out;
+}
+
 async function runSync() {
   const cfg = await settings();
   const { chromium } = await import('playwright');
@@ -148,14 +186,18 @@ async function runSync() {
   const frame = await setupForm(page, cfg.formUrl, cfg.chapter);
   const members = await optionLabels(frame, '#memberName_m');
   const weeks = await optionLabels(frame, '#week_m');
+  const questions = await readQuestions(frame, weeks);
   await browser.close();
-  if (weeks.length) await db.from('settings').upsert({ key: 'retention_weeks', value: weeks, updated_at: new Date().toISOString() });
+  const now = new Date().toISOString();
+  if (weeks.length) await db.from('settings').upsert({ key: 'retention_weeks', value: weeks, updated_at: now });
+  const qn = Object.values(questions).filter(a => a.length).length;
+  if (qn) await db.from('settings').upsert({ key: 'retention_questions', value: questions, updated_at: now });
   // เทียบชื่อในระบบกับชื่อในฟอร์มเดิม
   const { data: ours } = await db.from('members').select('full_name').eq('active', true);
   const norm = s => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
   const theirs = new Set(members.map(norm));
   const missing = (ours || []).map(m => m.full_name).filter(n => !theirs.has(norm(n)));
-  return `อัปเดตช่วงสัปดาห์ ${weeks.length} ช่วง · ฟอร์มเดิมมี ${members.length} รายชื่อ` + (missing.length ? ` · ชื่อในระบบที่ไม่พบในฟอร์มเดิม: ${missing.join(', ')}` : '');
+  return `อัปเดตช่วงสัปดาห์ ${weeks.length} ช่วง (มีรายการสิ่งที่ต้องทำ ${qn} ช่วง) · ฟอร์มเดิมมี ${members.length} รายชื่อ` + (missing.length ? ` · ชื่อในระบบที่ไม่พบในฟอร์มเดิม: ${missing.join(', ')}` : '');
 }
 
 let summary = '';
